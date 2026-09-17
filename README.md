@@ -16,7 +16,7 @@ This project implements a Debug Adapter Protocol (DAP) server and client - to be
 - **Smart Parameter Validation**: Intelligent command validation with helpful error messages and auto-completion
 - **Beautiful Table Formatting**: Professional Unicode table output for threads, variables, stack traces, and scopes
 - **Callback Architecture**: Clean separation between protocol handling and debugger implementation
-- **Production Ready**: Used in real-world projects like [nd100x](https://github.com/HackerCorpLabs/nd100x)
+- **Production Ready**: Used in real-world projects like [nd100x](https://github.com/RetroCoreLabs/nd100x)
 - **Cross-Platform**: Supports Linux, Windows, and other POSIX-compliant systems
 - **Memory Safe**: Comprehensive error handling and memory management
 
@@ -472,7 +472,7 @@ We welcome contributions! Here's how to get started:
 ## 📋 Real-World Usage
 
 libDAP is actively used in:
-- **[nd100x](https://github.com/HackerCorpLabs/nd100x)**: A CPU emulator project using the server component
+- **[nd100x](https://github.com/RetroCoreLabs/nd100x)**: A CPU emulator project using the server component
 
 *Using libDAP in your project? Let us know by opening an issue!*
 
