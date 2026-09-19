@@ -8,11 +8,10 @@
 
 #include <stddef.h>
 #include <stdbool.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/un.h>
-#include <netdb.h>
+/* Pulls in the right socket headers for the platform (BSD sockets or Winsock2)
+ * and defines dap_socket_t. Replaces the direct sys/socket.h + netinet + sys/un
+ * + netdb includes that only existed on POSIX. */
+#include "dap_net_compat.h"
 
 /**
  * @brief Transport configuration
@@ -43,8 +42,11 @@ typedef struct {
  */
 typedef struct DAPTransport {
     DAPTransportConfig config;
-    int listen_fd;
-    int client_fd;
+    /* dap_socket_t, not int: a Winsock SOCKET is an unsigned pointer-sized
+     * handle, and storing it in an int would both truncate it on x64 and break
+     * every "fd < 0" error test in the transport. */
+    dap_socket_t listen_fd;
+    dap_socket_t client_fd;
     bool is_server;    
     bool debuglog;
 } DAPTransport;

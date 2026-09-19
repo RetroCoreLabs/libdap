@@ -33,10 +33,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+/* Socket headers via the compat shim - the direct sys/socket.h + netinet +
+ * arpa + unistd includes here do not exist on Windows. errno.h stays for the
+ * non-socket uses; socket errors must go through dap_socket_errno(). */
+#include "dap_net_compat.h"
 #include <errno.h>
 #include <cjson/cJSON.h>
 #include "dap_types.h"

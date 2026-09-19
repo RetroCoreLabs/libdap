@@ -20,7 +20,10 @@
 typedef struct {
     char* host;              ///< Server hostname
     int port;                ///< Server port number
-    int fd;                  ///< Socket file descriptor (deprecated, kept for compatibility)
+    dap_socket_t fd;         ///< Socket file descriptor (deprecated, kept for compatibility).
+                             ///< dap_socket_t, not int: it is copied from
+                             ///< transport->client_fd, and a Winsock SOCKET
+                             ///< handle does not fit in an int on x64.
     bool connected;          ///< Connection state
     uint32_t seq;            ///< Request sequence number
     int timeout_ms;          ///< Timeout for requests in milliseconds

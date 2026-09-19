@@ -28,14 +28,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
 #include <errno.h>
 #include <stdbool.h>
-#include <poll.h>
+/* Socket headers and poll() through the shim - unistd, sys/socket, netinet,
+ * arpa, netdb and poll.h are all POSIX-only. dap_poll() is poll() here and
+ * WSAPoll() on Windows. */
+#include "dap_net_compat.h"
 #include "cJSON.h"
 #include <assert.h>
 
@@ -90,14 +88,15 @@ int dap_client_send_message(DAPClient* client, const char* message_str, char** r
     }
 
     // Wait for response with timeout
-    struct pollfd pfd = {
-        .fd = client->transport->client_fd,
-        .events = POLLIN
-    };
+    dap_pollfd_t pfd;
+    memset(&pfd, 0, sizeof pfd);
+    pfd.fd     = DAP_SOCK(client->transport->client_fd);
+    pfd.events = POLLIN;
 
-    int poll_result = poll(&pfd, 1, client->timeout_ms);
+    int poll_result = dap_poll(&pfd, 1, client->timeout_ms);
     if (poll_result < 0) {
-        DAP_CLIENT_DEBUG_LOG("Poll failed: %s", strerror(errno));
+        DAP_CLIENT_DEBUG_LOG("Poll failed: %s",
+                             dap_socket_strerror(dap_socket_errno()));
         return -1;
     } else if (poll_result == 0) {
         DAP_CLIENT_DEBUG_LOG("Timeout waiting for response");

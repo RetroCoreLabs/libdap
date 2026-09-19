@@ -62,11 +62,17 @@ target_include_directories(dap_objects
         ${CMAKE_CURRENT_SOURCE_DIR}/libdap/include
 )
 
-# Find pthread on UNIX platforms
-if(UNIX)
-    set(THREADS_PREFER_PTHREAD_FLAG ON)
-    find_package(Threads REQUIRED)
-    target_link_libraries(dap_objects PUBLIC Threads::Threads)
+# Threads. Threads::Threads resolves to -lpthread on Linux, to nothing on macOS
+# (pthreads live in libSystem) and to winpthreads under MinGW - so it is asked
+# for on every platform rather than only on UNIX.
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+target_link_libraries(dap_objects PUBLIC Threads::Threads)
+
+# Winsock. The transport and client talk sockets through libdap/include/
+# dap_net_compat.h, which maps onto ws2_32 here and onto libc everywhere else.
+if(WIN32)
+    target_link_libraries(dap_objects PUBLIC ws2_32)
 endif()
 
 # Handle cJSON based on detection method

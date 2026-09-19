@@ -29,17 +29,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <netdb.h> // For gethostbyname and struct hostent
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h> // For TCP_NODELAY
-#include <arpa/inet.h>   // For inet_ntop
-#include <unistd.h>      // For close
-#include <fcntl.h>       // For fcntl, F_GETFL, F_SETFL, O_NONBLOCK
-#include <sys/select.h>
-#include <sys/time.h>
+/* All the socket headers that used to be listed here individually - netdb,
+ * sys/socket, sys/un, netinet/in, netinet/tcp, arpa/inet, unistd, fcntl,
+ * sys/select, sys/time - are POSIX-only. dap_net_compat.h pulls in the right
+ * set for the platform (those on POSIX, winsock2 + ws2tcpip on Windows) and
+ * supplies dap_socket_close(), dap_socket_errno() and
+ * dap_socket_set_nonblocking() for the calls that have no Winsock equivalent.
+ *
+ * select() itself needs no wrapper: Winsock provides it with the same shape,
+ * as long as it is only ever handed SOCKETS (which is the case here). */
 #include "dap_transport.h"
 #include "dap_error.h"
 
@@ -88,8 +86,8 @@ DAPTransport *dap_transport_create(const DAPTransportConfig *config)
     }
 
     transport->config = *config;
-    transport->listen_fd = -1;
-    transport->client_fd = -1;
+    transport->listen_fd = DAP_INVALID_SOCKET;
+    transport->client_fd = DAP_INVALID_SOCKET;
     transport->is_server = true;
     transport->debuglog = false; // Initialize debuglog to false by default
 
@@ -110,7 +108,14 @@ int dap_transport_start(DAPTransport *transport)
     case DAP_TRANSPORT_TCP:
     {
         DEBUG_LOG("Creating TCP socket");
-        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        /* On Windows nothing below works until WSAStartup has run. Refcounted,
+         * so calling it again from the client side is harmless. */
+        if (dap_net_init() != 0)
+        {
+            dap_error_set(DAP_ERROR_TRANSPORT, "Failed to initialise socket layer");
+            return -1;
+        }
+        dap_socket_t fd = (dap_socket_t)socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0)
         {
             dap_error_set(DAP_ERROR_TRANSPORT, "Failed to create socket");
@@ -119,10 +124,11 @@ int dap_transport_start(DAPTransport *transport)
 
         // Allow reuse of the address
         int opt = 1;
-        if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+        if (setsockopt(DAP_SOCK(fd), SOL_SOCKET, SO_REUSEADDR, DAP_SOCKOPT(&opt), sizeof(opt)) < 0)
         {
-            DEBUG_LOG("Failed to set socket option: %s (errno=%d)", strerror(errno), errno);
-            close(fd);
+            int e = dap_socket_errno();
+            DEBUG_LOG("Failed to set socket option: %s (errno=%d)", dap_socket_strerror(e), e);
+            dap_socket_close(fd);
             return -1;
         }
 
@@ -133,31 +139,45 @@ int dap_transport_start(DAPTransport *transport)
         addr.sin_port = htons(transport->config.config.tcp.port);
 
         DEBUG_LOG("Binding to port %d", transport->config.config.tcp.port);
-        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+        if (bind(DAP_SOCK(fd), (struct sockaddr *)&addr, sizeof(addr)) < 0)
         {
-            DEBUG_LOG("Failed to bind socket: %s (errno=%d)", strerror(errno), errno);
+            int e = dap_socket_errno();
+            DEBUG_LOG("Failed to bind socket: %s (errno=%d)", dap_socket_strerror(e), e);
             dap_error_set(DAP_ERROR_TRANSPORT, "Failed to bind socket");
-            close(fd);
+            dap_socket_close(fd);
             return -1;
         }
 
         DEBUG_LOG("Listening for connections");
-        if (listen(fd, 5) < 0)
+        if (listen(DAP_SOCK(fd), 5) < 0)
         {
             dap_error_set(DAP_ERROR_TRANSPORT, "Failed to listen on socket");
-            close(fd);
+            dap_socket_close(fd);
             return -1;
         }
 
         transport->listen_fd = fd;
-        transport->client_fd = -1;
+        transport->client_fd = DAP_INVALID_SOCKET;
         DEBUG_LOG("TCP transport started successfully");
         break;
     }
 
     case DAP_TRANSPORT_UNIX:
     {
-        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+#ifndef DAP_HAVE_AF_UNIX
+        /* Windows gained AF_UNIX in 10 build 17063, but only through
+         * <afunix.h>. A toolchain without that header cannot build this at
+         * all, so refuse cleanly instead of failing to compile. */
+        dap_error_set(DAP_ERROR_NOT_IMPLEMENTED,
+                      "UNIX-socket transport is not available on this platform");
+        return -1;
+#else
+        if (dap_net_init() != 0)
+        {
+            dap_error_set(DAP_ERROR_TRANSPORT, "Failed to initialise socket layer");
+            return -1;
+        }
+        dap_socket_t fd = (dap_socket_t)socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd < 0)
         {
             dap_error_set(DAP_ERROR_TRANSPORT, "Failed to create socket");
@@ -170,25 +190,29 @@ int dap_transport_start(DAPTransport *transport)
         strncpy(addr.sun_path, transport->config.config.unix_socket.path,
                 sizeof(addr.sun_path) - 1);
 
-        unlink(transport->config.config.unix_socket.path);
+        /* Remove a stale socket file left by a previous run. remove() rather
+         * than unlink(): identical for files, and it is in <stdio.h> on every
+         * platform, whereas unlink() needs unistd.h. */
+        remove(transport->config.config.unix_socket.path);
 
-        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+        if (bind(DAP_SOCK(fd), (struct sockaddr *)&addr, sizeof(addr)) < 0)
         {
             dap_error_set(DAP_ERROR_TRANSPORT, "Failed to bind socket");
-            close(fd);
+            dap_socket_close(fd);
             return -1;
         }
 
-        if (listen(fd, 5) < 0)
+        if (listen(DAP_SOCK(fd), 5) < 0)
         {
             dap_error_set(DAP_ERROR_TRANSPORT, "Failed to listen on socket");
-            close(fd);
+            dap_socket_close(fd);
             return -1;
         }
 
         transport->listen_fd = fd;
-        transport->client_fd = -1;
+        transport->client_fd = DAP_INVALID_SOCKET;
         break;
+#endif
     }
 
     case DAP_TRANSPORT_PIPE:
@@ -224,14 +248,17 @@ int dap_transport_accept(DAPTransport *transport)
     fd_set read_fds;
     struct timeval tv;
     FD_ZERO(&read_fds);
-    FD_SET(transport->listen_fd, &read_fds);
+    FD_SET(DAP_SOCK(transport->listen_fd), &read_fds);
 
     // Set timeout to 100ms
     tv.tv_sec = 0;
     tv.tv_usec = 100000; // 100ms in microseconds
 
-    // Wait for connection with timeout
-    int select_result = select(transport->listen_fd + 1, &read_fds, NULL, NULL, &tv);
+    /* Wait for connection with timeout.
+     * The first argument is ignored by Winsock (it tracks fd_set membership by
+     * handle, not by numbering), and passing listen_fd + 1 on a large SOCKET
+     * handle is harmless there. On POSIX it still means what it always did. */
+    int select_result = select((int)(transport->listen_fd + 1), &read_fds, NULL, NULL, &tv);
     if (select_result < 0)
     {
         dap_error_set(DAP_ERROR_TRANSPORT, "Select failed");
@@ -239,15 +266,20 @@ int dap_transport_accept(DAPTransport *transport)
     }
     if (select_result == 0)
     {
-        // Timeout occurred
+        /* Timeout. Deliberately the C-library errno and NOT the socket error:
+         * this is a hand-rolled signal to the caller, and dap_server.c reads it
+         * back with the same plain errno test. Keeping both ends on errno makes
+         * the handshake work identically on Windows, where Winsock errors would
+         * never have shown up in errno at all. */
         errno = EAGAIN;
         return -1;
     }
 
     // Connection is available, accept it
     struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    int client_fd = accept(transport->listen_fd, (struct sockaddr *)&client_addr, &client_len);
+    dap_socklen_t client_len = sizeof(client_addr);
+    dap_socket_t client_fd = (dap_socket_t)accept(DAP_SOCK(transport->listen_fd),
+                                                  (struct sockaddr *)&client_addr, &client_len);
     if (client_fd < 0)
     {
         dap_error_set(DAP_ERROR_TRANSPORT, "Failed to accept connection");
@@ -302,14 +334,17 @@ int dap_transport_stop(DAPTransport *transport)
 
     if (transport->client_fd >= 0)
     {
-        close(transport->client_fd);
-        transport->client_fd = -1;
+        dap_socket_close(transport->client_fd);
+        transport->client_fd = DAP_INVALID_SOCKET;
     }
 
     if (transport->listen_fd >= 0)
     {
-        close(transport->listen_fd);
-        transport->listen_fd = -1;
+        dap_socket_close(transport->listen_fd);
+        transport->listen_fd = DAP_INVALID_SOCKET;
+        /* Balances the dap_net_init() in dap_transport_start(). Refcounted, so
+         * a client transport still running keeps Winsock alive. */
+        dap_net_shutdown();
     }
 
     return 0;
@@ -350,9 +385,11 @@ int dap_transport_send(DAPTransport *transport, const char *message)
     if (transport->config.type == DAP_TRANSPORT_TCP)
     {
         int flag = 1;
-        if (setsockopt(transport->client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0)
+        if (setsockopt(DAP_SOCK(transport->client_fd), IPPROTO_TCP, TCP_NODELAY,
+                       DAP_SOCKOPT(&flag), sizeof(flag)) < 0)
         {
-            DEBUG_LOG_CHECK(transport, "Failed to set TCP_NODELAY: %s", strerror(errno));
+            DEBUG_LOG_CHECK(transport, "Failed to set TCP_NODELAY: %s",
+                            dap_socket_strerror(dap_socket_errno()));
         }
         else
         {
@@ -360,9 +397,10 @@ int dap_transport_send(DAPTransport *transport, const char *message)
         }
     }
 
-    // Send message
-    ssize_t total_sent = 0;
-    ssize_t remaining = header_length;
+    /* dap_ssize_t, not ssize_t: Winsock's send/recv return int and MinGW has no
+     * ssize_t in its socket headers. */
+    dap_ssize_t total_sent = 0;
+    dap_ssize_t remaining = header_length;
     const char *curr_ptr = header;
 
     if (transport->debuglog)
@@ -376,14 +414,16 @@ int dap_transport_send(DAPTransport *transport, const char *message)
     // Send header
     while (remaining > 0)
     {
-        ssize_t sent = send(transport->client_fd, curr_ptr, remaining, 0);
+        dap_ssize_t sent = send(DAP_SOCK(transport->client_fd), DAP_CBUF(curr_ptr),
+                                DAP_LEN(remaining), 0);
         if (sent <= 0)
         {
-            if (errno == EINTR)
+            int e = dap_socket_errno();
+            if (e == DAP_EINTR)
             {
                 continue;
             }
-            DEBUG_LOG_CHECK(transport, "Failed to send header: %s", strerror(errno));
+            DEBUG_LOG_CHECK(transport, "Failed to send header: %s", dap_socket_strerror(e));
             return -1;
         }
         total_sent += sent;
@@ -391,7 +431,9 @@ int dap_transport_send(DAPTransport *transport, const char *message)
         remaining -= sent;
     }
 
-    DEBUG_LOG_CHECK(transport, "Header: sent %zd/%d bytes", total_sent, header_length);
+    /* %ld with a long cast, not %zd: dap_ssize_t is ssize_t on POSIX but plain
+     * int on Windows, so no single length modifier is right for both. */
+    DEBUG_LOG_CHECK(transport, "Header: sent %ld/%d bytes", (long)total_sent, header_length);
 
     // Reset for content
     total_sent = 0;
@@ -401,14 +443,16 @@ int dap_transport_send(DAPTransport *transport, const char *message)
     // Send content
     while (remaining > 0)
     {
-        ssize_t sent = send(transport->client_fd, curr_ptr, remaining, 0);
+        dap_ssize_t sent = send(DAP_SOCK(transport->client_fd), DAP_CBUF(curr_ptr),
+                                DAP_LEN(remaining), 0);
         if (sent <= 0)
         {
-            if (errno == EINTR)
+            int e = dap_socket_errno();
+            if (e == DAP_EINTR)
             {
                 continue;
             }
-            DEBUG_LOG_CHECK(transport, "Failed to send content: %s", strerror(errno));
+            DEBUG_LOG_CHECK(transport, "Failed to send content: %s", dap_socket_strerror(e));
             return -1;
         }
         total_sent += sent;
@@ -416,20 +460,22 @@ int dap_transport_send(DAPTransport *transport, const char *message)
         remaining -= sent;
     }
 
-    DEBUG_LOG_CHECK(transport, "Content: sent %zd/%zu bytes", total_sent, content_length);
+    DEBUG_LOG_CHECK(transport, "Content: sent %ld/%zu bytes", (long)total_sent, content_length);
     DEBUG_LOG_CHECK(transport, "Message sent successfully - Total bytes: %zu", header_length + content_length);
 
     // Force flush the TCP buffer by toggling TCP_NODELAY
     if (transport->config.type == DAP_TRANSPORT_TCP)
     {
         int flag = 0;
-        setsockopt(transport->client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+        setsockopt(DAP_SOCK(transport->client_fd), IPPROTO_TCP, TCP_NODELAY,
+                   DAP_SOCKOPT(&flag), sizeof(flag));
         flag = 1;
-        setsockopt(transport->client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+        setsockopt(DAP_SOCK(transport->client_fd), IPPROTO_TCP, TCP_NODELAY,
+                   DAP_SOCKOPT(&flag), sizeof(flag));
 
         // Force a small write to trigger immediate flush
         char flush_byte = 0;
-        send(transport->client_fd, &flush_byte, 0, 0);
+        send(DAP_SOCK(transport->client_fd), DAP_CBUF(&flush_byte), 0, 0);
 
         DEBUG_LOG_CHECK(transport, "Socket flush completed");
     }
@@ -444,24 +490,24 @@ int dap_transport_send(DAPTransport *transport, const char *message)
  * @param timeout_ms Timeout in milliseconds
  * @return true if error condition exists, false otherwise
  */
-static bool check_fd_error(int fd, int timeout_ms)
+static bool check_fd_error(dap_socket_t fd, int timeout_ms)
 {
     fd_set error_fds;
     struct timeval tv;
 
     // Initialize the file descriptor set
     FD_ZERO(&error_fds);
-    FD_SET(fd, &error_fds);
+    FD_SET(DAP_SOCK(fd), &error_fds);
 
     // Set timeout
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
     // Check for error condition using select
-    int result = select(fd + 1, NULL, NULL, &error_fds, &tv);
+    int result = select((int)(fd + 1), NULL, NULL, &error_fds, &tv);
 
     // Return true if select indicates an error condition
-    return (result > 0 && FD_ISSET(fd, &error_fds));
+    return (result > 0 && FD_ISSET(DAP_SOCK(fd), &error_fds));
 }
 
 /**
@@ -471,24 +517,24 @@ static bool check_fd_error(int fd, int timeout_ms)
  * @param timeout_ms Timeout in milliseconds
  * @return true if data is available to read, false otherwise
  */
-static bool check_fd_readable(int fd, int timeout_ms)
+static bool check_fd_readable(dap_socket_t fd, int timeout_ms)
 {
     fd_set read_fds;
     struct timeval tv;
 
     // Initialize the file descriptor set
     FD_ZERO(&read_fds);
-    FD_SET(fd, &read_fds);
+    FD_SET(DAP_SOCK(fd), &read_fds);
 
     // Set timeout
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
     // Check for readability using select
-    int result = select(fd + 1, &read_fds, NULL, NULL, &tv);
+    int result = select((int)(fd + 1), &read_fds, NULL, NULL, &tv);
 
     // Return true if select indicates data is available to read
-    return (result > 0 && FD_ISSET(fd, &read_fds));
+    return (result > 0 && FD_ISSET(DAP_SOCK(fd), &read_fds));
 }
 
 int try_receive_message(DAPTransport *transport, char *buf, int maxlen, bool readHeader)
@@ -498,7 +544,7 @@ int try_receive_message(DAPTransport *transport, char *buf, int maxlen, bool rea
 
     while (true)
     {
-        ssize_t rcvcnt = recv(transport->client_fd, smallbuf, 1, 0);
+        dap_ssize_t rcvcnt = recv(DAP_SOCK(transport->client_fd), DAP_BUF(smallbuf), 1, 0);
         if (rcvcnt <= 0)
         {
             return -1;
@@ -577,7 +623,8 @@ int dap_transport_receive(DAPTransport *transport, char **message)
     int header_received = try_receive_message(transport, header_buffer, sizeof(header_buffer), true);
     if (header_received <= 0)
     {
-        DEBUG_LOG_CHECK(transport, "Failed to receive header: %s", strerror(errno));
+        DEBUG_LOG_CHECK(transport, "Failed to receive header: %s",
+                        dap_socket_strerror(dap_socket_errno()));
         dap_error_set(DAP_ERROR_TRANSPORT, "Failed to receive header");
         return -1;
     }
@@ -639,11 +686,12 @@ int dap_transport_receive(DAPTransport *transport, char **message)
         return -1;
     }
 
-    ssize_t content_received = try_receive_message(transport, buffer, content_length, false);
+    dap_ssize_t content_received = try_receive_message(transport, buffer, content_length, false);
 
     if (content_received < 0)
     {
-        DEBUG_LOG_CHECK(transport, "Failed to receive content: %s", strerror(errno));
+        DEBUG_LOG_CHECK(transport, "Failed to receive content: %s",
+                        dap_socket_strerror(dap_socket_errno()));
         free(buffer);
         dap_error_set(DAP_ERROR_TRANSPORT, "Failed to receive content");
         return -1;
@@ -688,7 +736,12 @@ int dap_transport_connect(DAPTransport *transport)
     case DAP_TRANSPORT_TCP:
     {
         // Create socket
-        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (dap_net_init() != 0)
+        {
+            dap_error_set(DAP_ERROR_TRANSPORT, "Failed to initialise socket layer");
+            return -1;
+        }
+        dap_socket_t fd = (dap_socket_t)socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0)
         {
             dap_error_set(DAP_ERROR_TRANSPORT, "Failed to create socket");
@@ -697,9 +750,11 @@ int dap_transport_connect(DAPTransport *transport)
 
         // Enable TCP_NODELAY to disable Nagle's algorithm for timely delivery
         int flag = 1;
-        if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0)
+        if (setsockopt(DAP_SOCK(fd), IPPROTO_TCP, TCP_NODELAY,
+                       DAP_SOCKOPT(&flag), sizeof(flag)) < 0)
         {
-            DEBUG_LOG("Warning: Failed to set TCP_NODELAY: %s", strerror(errno));
+            DEBUG_LOG("Warning: Failed to set TCP_NODELAY: %s",
+                      dap_socket_strerror(dap_socket_errno()));
         }
 
         // Set up server address
@@ -708,59 +763,75 @@ int dap_transport_connect(DAPTransport *transport)
         server_addr.sin_family = AF_INET;
         server_addr.sin_port = htons(transport->config.config.tcp.port);
 
-        // Get server's IP address from hostname
-        struct hostent *server = gethostbyname(transport->config.config.tcp.host);
-        if (!server)
+        /* Resolve the host name.
+         * getaddrinfo rather than gethostbyname: gethostbyname is deprecated on
+         * both platforms, is not thread-safe, and is IPv4-only. getaddrinfo is
+         * the one spelling that exists and behaves the same on POSIX and
+         * Winsock. */
         {
-            dap_error_set(DAP_ERROR_TRANSPORT, "Could not resolve hostname");
-            close(fd);
-            return -1;
+            struct addrinfo hints, *res = NULL;
+            char portstr[16];
+            memset(&hints, 0, sizeof hints);
+            hints.ai_family   = AF_INET;          /* sockaddr_in below is IPv4 */
+            hints.ai_socktype = SOCK_STREAM;
+            snprintf(portstr, sizeof portstr, "%d", transport->config.config.tcp.port);
+
+            if (getaddrinfo(transport->config.config.tcp.host, portstr, &hints, &res) != 0
+                || res == NULL)
+            {
+                dap_error_set(DAP_ERROR_TRANSPORT, "Could not resolve hostname");
+                dap_socket_close(fd);
+                return -1;
+            }
+            memcpy(&server_addr, res->ai_addr, sizeof(server_addr));
+            freeaddrinfo(res);
         }
-        memcpy(&server_addr.sin_addr.s_addr, server->h_addr_list[0], server->h_length);
 
         // Connect to server with a timeout to avoid blocking the caller
         // (e.g. a GUI main thread) for 20+ seconds on unreachable hosts.
-        int flags = fcntl(fd, F_GETFL, 0);
-        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        dap_socket_set_nonblocking(fd, 1);
 
-        int conn_rc = connect(fd, (struct sockaddr *)&server_addr, sizeof(server_addr));
-        if (conn_rc < 0 && errno == EINPROGRESS)
+        int conn_rc = connect(DAP_SOCK(fd), (struct sockaddr *)&server_addr, sizeof(server_addr));
+        /* A non-blocking connect that has not finished reports EINPROGRESS on
+         * POSIX and WSAEWOULDBLOCK on Winsock - DAP_EINPROGRESS is whichever
+         * applies here. */
+        if (conn_rc < 0 && dap_socket_errno() == DAP_EINPROGRESS)
         {
             // Wait for connection with a 3-second timeout
             fd_set wfds;
             FD_ZERO(&wfds);
-            FD_SET(fd, &wfds);
+            FD_SET(DAP_SOCK(fd), &wfds);
             struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
 
-            int sel = select(fd + 1, NULL, &wfds, NULL, &tv);
+            int sel = select((int)(fd + 1), NULL, &wfds, NULL, &tv);
             if (sel <= 0)
             {
                 dap_error_set(DAP_ERROR_TRANSPORT,
                     sel == 0 ? "Connection timed out" : "Connection failed");
-                close(fd);
+                dap_socket_close(fd);
                 return -1;
             }
 
             // Check if the connection actually succeeded
             int so_error = 0;
-            socklen_t so_len = sizeof(so_error);
-            getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &so_len);
+            dap_socklen_t so_len = sizeof(so_error);
+            getsockopt(DAP_SOCK(fd), SOL_SOCKET, SO_ERROR, DAP_BUF(&so_error), &so_len);
             if (so_error != 0)
             {
                 dap_error_set(DAP_ERROR_TRANSPORT, "Connection refused");
-                close(fd);
+                dap_socket_close(fd);
                 return -1;
             }
         }
         else if (conn_rc < 0)
         {
             dap_error_set(DAP_ERROR_TRANSPORT, "Failed to connect to server");
-            close(fd);
+            dap_socket_close(fd);
             return -1;
         }
 
         // Restore blocking mode for subsequent I/O
-        if (flags >= 0) fcntl(fd, F_SETFL, flags);
+        dap_socket_set_nonblocking(fd, 0);
 
         transport->client_fd = fd;
         break;
@@ -768,8 +839,20 @@ int dap_transport_connect(DAPTransport *transport)
 
     case DAP_TRANSPORT_UNIX:
     {
+#ifndef DAP_HAVE_AF_UNIX
+        /* See the matching guard in dap_transport_start(): AF_UNIX needs
+         * <afunix.h>, which older Windows toolchains do not ship. */
+        dap_error_set(DAP_ERROR_NOT_IMPLEMENTED,
+                      "UNIX-socket transport is not available on this platform");
+        return -1;
+#else
         // Create socket
-        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (dap_net_init() != 0)
+        {
+            dap_error_set(DAP_ERROR_TRANSPORT, "Failed to initialise socket layer");
+            return -1;
+        }
+        dap_socket_t fd = (dap_socket_t)socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd < 0)
         {
             dap_error_set(DAP_ERROR_TRANSPORT, "Failed to create socket");
@@ -784,15 +867,16 @@ int dap_transport_connect(DAPTransport *transport)
                 sizeof(server_addr.sun_path) - 1);
 
         // Connect to server
-        if (connect(fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
+        if (connect(DAP_SOCK(fd), (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
         {
             dap_error_set(DAP_ERROR_TRANSPORT, "Failed to connect to server");
-            close(fd);
+            dap_socket_close(fd);
             return -1;
         }
 
         transport->client_fd = fd;
         break;
+#endif
     }
 
     case DAP_TRANSPORT_PIPE:
