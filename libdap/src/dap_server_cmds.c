@@ -1464,6 +1464,21 @@ int handle_disassemble(DAPServer *server, cJSON *args, DAPResponse *response)
             cJSON_AddStringToObject(instruction_obj, "symbol", instruction->symbol);
         }
 
+        /* DAP DisassembledInstruction: location (a Source) and line, when the server knows them; VS Code's
+         * Disassembly view shows the source line above the instructions that come from it. */
+        if (instruction->source_path && instruction->line > 0)
+        {
+            cJSON *location = cJSON_CreateObject();
+            if (location)
+            {
+                const char *name = strrchr(instruction->source_path, '/');
+                cJSON_AddStringToObject(location, "name", name ? name + 1 : instruction->source_path);
+                cJSON_AddStringToObject(location, "path", instruction->source_path);
+                cJSON_AddItemToObject(instruction_obj, "location", location);
+            }
+            cJSON_AddNumberToObject(instruction_obj, "line", instruction->line);
+        }
+
 
         cJSON_AddItemToArray(instructions, instruction_obj);
     }

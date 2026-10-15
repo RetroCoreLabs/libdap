@@ -366,6 +366,10 @@ void cleanup_command_context(DAPServer *server)
                 if (instruction->address)
                 {
                     free(instruction->address);
+                }
+                if (instruction->source_path)
+                {
+                    free(instruction->source_path);
                 }         
             }
             

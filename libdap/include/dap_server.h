@@ -438,6 +438,8 @@ typedef struct {
     char *address;
     char *instruction;
     char *symbol;
+    char *source_path;   /**< source file of the instruction (DAP DisassembledInstruction.location), or NULL; owned */
+    int   line;          /**< its source line, or 0 when not known */
 } DisassembleInstruction;
 
 
