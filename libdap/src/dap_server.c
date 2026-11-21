@@ -589,6 +589,14 @@ int dap_server_handle_command(DAPServer *server, DAPCommandType command,
     response->error_message = NULL;
     response->data = NULL;
 
+    // Every command starts with an empty context. The context is a union shared by all
+    // commands, and a handler fills only its own member (launch fills none: its arguments go
+    // to debugger_state). cleanup_command_context() frees the pointers of the member of the
+    // command type, so a member left as the previous command wrote it was freed a second
+    // time, or freed as pointers it never held: launch sent after other commands on a
+    // running machine crashed (signal 11 in cleanup_command_context).
+    memset(&server->current_command.context, 0, sizeof(server->current_command.context));
+
     // Store command information for callbacks to access
     server->current_command.type = command;
     server->current_command.request_seq = response->request_seq;

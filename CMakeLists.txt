@@ -164,6 +164,16 @@ else()
     message(STATUS "Skipping DAP test tools build (use --with-dap-tools to enable)")
 endif()
 
+# Unit tests (ctest), only when libdap is the top-level project: a parent that adds
+# libdap with add_subdirectory (nd100x) keeps its own test list.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    enable_testing()
+    add_executable(test_server_context tests/test_server_context.c)
+    target_link_libraries(test_server_context PRIVATE dap_objects ${CJSON_LINK_LIBS} Threads::Threads)
+    target_include_directories(test_server_context PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libdap/include)
+    add_test(NAME server_context_tests COMMAND test_server_context)
+endif()
+
 # Install rules
 install(TARGETS dap_objects
         EXPORT dap_objects-export

@@ -2663,7 +2663,6 @@ int handle_attach(DAPServer *server, cJSON *args, DAPResponse *response)
     // operating system on the target starts (a SINTRAN :PROG) is attached to after the boot,
     // and its line table is loaded then. The implementation callback (DAP_CMD_ATTACH)
     // loads them; without a callback the arguments are only stored.
-    server->current_command.type = DAP_CMD_ATTACH;
     if (parse_attach_symbol_args(server, args) != 0)
     {
         response->success = false;
@@ -2671,7 +2670,8 @@ int handle_attach(DAPServer *server, cJSON *args, DAPResponse *response)
         return 0;
     }
     parse_program_args(server, args);
-    if (dap_server_execute_callback(server, DAP_CMD_ATTACH) < 0)
+    if (server->command_callbacks[DAP_CMD_ATTACH] &&
+        dap_server_execute_callback(server, DAP_CMD_ATTACH) < 0)
     {
         response->success = false;
         response->error_message = strdup("Attach failed");
