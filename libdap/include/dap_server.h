@@ -672,6 +672,15 @@ typedef struct {
     bool stop_at_entry;           /**< Whether to stop at the entry point */
     uint32_t text_start;          /**< Text segment load address (from -T flag or a.out a_entry) */
 
+    // The program the session debugs, on a machine that runs several programs on the same
+    // addresses (interrupt levels, page tables). Read from the launch and attach arguments
+    // "programLevel", "programContext" and "programFromFirstStop"; not standard DAP fields
+    // (DAP lets a debug adapter add its own launch/attach arguments).
+    int program_level;            /**< Level the program runs on (ND-100: PIL); -1 not named */
+    int64_t program_context;      /**< Machine value that names the program's address space
+                                       (ND-100: the PCR); -1 not named */
+    bool program_from_first_stop; /**< Take level and context from the first breakpoint stop */
+
     // Command line arguments
     char** args;                  /**< Command line arguments array */
     int args_count;               /**< Number of command line arguments */

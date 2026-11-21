@@ -2195,6 +2195,115 @@ int handle_set_function_breakpoints(DAPServer *server, cJSON *args, DAPResponse 
     return 0;
 }
 
+/**
+ * @brief Read the program the session debugs from launch or attach arguments.
+ *
+ * "programLevel" (number), "programContext" (number) and "programFromFirstStop" (bool) are
+ * this library's own arguments, not DAP fields: a machine that runs several programs on the
+ * same addresses (the ND-100 under SINTRAN: interrupt levels and page tables) uses them to
+ * tie breakpoints and steps to one program. Absent: -1, -1, false (any program).
+ */
+static void parse_program_args(DAPServer *server, cJSON *args)
+{
+    server->debugger_state.program_level = -1;
+    server->debugger_state.program_context = -1;
+    server->debugger_state.program_from_first_stop = false;
+    if (!args)
+    {
+        return;
+    }
+    cJSON *level = cJSON_GetObjectItem(args, "programLevel");
+    if (level && cJSON_IsNumber(level))
+    {
+        server->debugger_state.program_level = level->valueint;
+    }
+    cJSON *context = cJSON_GetObjectItem(args, "programContext");
+    if (context && cJSON_IsNumber(context))
+    {
+        server->debugger_state.program_context = (int64_t)context->valuedouble;
+    }
+    cJSON *first = cJSON_GetObjectItem(args, "programFromFirstStop");
+    if (first && cJSON_IsBool(first))
+    {
+        server->debugger_state.program_from_first_stop = cJSON_IsTrue(first);
+    }
+}
+
+/**
+ * @brief Read "mapFile", "sourceFile" and "sourcePaths" of an attach request into the
+ *        debugger state, as launch does, replacing what an earlier launch or attach left.
+ * @return 0, or -1 when memory runs out
+ */
+static int parse_attach_symbol_args(DAPServer *server, cJSON *args)
+{
+    free((void *)server->debugger_state.map_path);
+    server->debugger_state.map_path = NULL;
+    free((void *)server->debugger_state.source_path);
+    server->debugger_state.source_path = NULL;
+    for (int i = 0; i < server->debugger_state.source_paths_count; i++)
+    {
+        free(server->debugger_state.source_paths[i]);
+    }
+    free(server->debugger_state.source_paths);
+    server->debugger_state.source_paths = NULL;
+    server->debugger_state.source_paths_count = 0;
+    if (!args)
+    {
+        return 0;
+    }
+
+    cJSON *map_file = cJSON_GetObjectItem(args, "mapFile");
+    if (map_file && cJSON_IsString(map_file) && map_file->valuestring)
+    {
+        server->debugger_state.map_path = strdup(map_file->valuestring);
+        if (!server->debugger_state.map_path)
+        {
+            return -1;
+        }
+    }
+    cJSON *source_file = cJSON_GetObjectItem(args, "sourceFile");
+    if (source_file && cJSON_IsString(source_file) && source_file->valuestring)
+    {
+        server->debugger_state.source_path = strdup(source_file->valuestring);
+        if (!server->debugger_state.source_path)
+        {
+            return -1;
+        }
+    }
+    cJSON *paths = cJSON_GetObjectItem(args, "sourcePaths");
+    if (paths && cJSON_IsArray(paths) && cJSON_GetArraySize(paths) > 0)
+    {
+        int n = cJSON_GetArraySize(paths);
+        char **arr = calloc((size_t)n, sizeof(char *));
+        if (!arr)
+        {
+            return -1;
+        }
+        int count = 0;
+        for (int i = 0; i < n; i++)
+        {
+            cJSON *sp = cJSON_GetArrayItem(paths, i);
+            if (sp && cJSON_IsString(sp) && sp->valuestring)
+            {
+                arr[count] = strdup(sp->valuestring);
+                if (!arr[count])
+                {
+                    for (int j = 0; j < count; j++)
+                    {
+                        free(arr[j]);
+                    }
+                    free(arr);
+                    return -1;
+                }
+                count++;
+            }
+        }
+        server->debugger_state.source_paths = arr;
+        server->debugger_state.source_paths_count = count;
+    }
+    return 0;
+}
+
 int handle_launch(DAPServer *server, cJSON *args, DAPResponse *response)
 {
     if (!server || !args || !response)
@@ -2469,6 +2578,8 @@ int handle_launch(DAPServer *server, cJSON *args, DAPResponse *response)
         }
     }
 
+    parse_program_args(server, args);
+
     // Call the implementation callback if registered
     int callback_result = dap_server_execute_callback(server, DAP_CMD_LAUNCH);
     if (callback_result < 0)
@@ -2547,6 +2658,25 @@ int handle_attach(DAPServer *server, cJSON *args, DAPResponse *response)
         pid_value = pid->valueint;
     }
     DAP_SERVER_DEBUG_LOG("Attach: pid=%d%s", pid_value, pid ? "" : " (defaulted)");
+
+    // An attach may name a map file and the program, as launch does: a program that an
+    // operating system on the target starts (a SINTRAN :PROG) is attached to after the boot,
+    // and its line table is loaded then. The implementation callback (DAP_CMD_ATTACH)
+    // loads them; without a callback the arguments are only stored.
+    server->current_command.type = DAP_CMD_ATTACH;
+    if (parse_attach_symbol_args(server, args) != 0)
+    {
+        response->success = false;
+        response->error_message = strdup("Out of memory reading the attach arguments");
+        return 0;
+    }
+    parse_program_args(server, args);
+    if (dap_server_execute_callback(server, DAP_CMD_ATTACH) < 0)
+    {
+        response->success = false;
+        response->error_message = strdup("Attach failed");
+        return 0;
+    }
 
     server->attached = true;
     server->debugger_state.has_stopped = true;
