@@ -1416,7 +1416,7 @@ int dap_server_send_exited_event(DAPServer *server, int exitCode)
         cJSON_AddNumberToObject(event_body, "exitCode", exitCode);
 
         // Send the event
-        dap_server_send_event(server, "terminated", event_body);
+        dap_server_send_event(server, "exited", event_body);
 
         return 0;
     }
