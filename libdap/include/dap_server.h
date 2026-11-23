@@ -519,6 +519,7 @@ typedef struct {
     const char* type;               /**< Type of the result (optional) */
     int variables_reference;        /**< Reference to children if result is structured (0 = none) */
     uint32_t memory_reference;      /**< Memory address if result is addressable (-1 = not present) */
+    FormatOptions format_options;   /**< The request's "format" (hex: VS Code "View as hex") */
 } EvaluateCommandContext;
 
 /**
@@ -629,6 +630,14 @@ typedef struct {
 } GetCpuTraceRingContext;
 
 /**
+ * @struct SetRadixContext
+ * @brief Context for setRadix command (custom): {"radix": "octal" | "decimal" | "hex"}
+ */
+typedef struct {
+    char radix[16];             /**< The radix word as sent, "" when absent */
+} SetRadixContext;
+
+/**
  * @typedef DAPCommandCallback
  * @brief Function signature for command implementation callbacks
  * 
@@ -703,7 +712,11 @@ struct DAPServer
     DAPTransport *transport; /**< Transport instance */
     bool is_running;         /**< Indicates if the servers transport layer is active */
     bool is_initialized;     /**< Indicates if the server is initialized */
-    bool attached;           /**< Indicates if the debugger is attached to target */        
+    bool attached;           /**< Indicates if the debugger is attached to target */
+    char radix_argument[16]; /**< The "radix" argument of the last launch or attach, "" when absent */
+    /** Writes a whole number of a frame name (the offset from the routine entry and the address) in the
+     *  implementation's radix; NULL keeps the offset decimal and the address octal without a suffix. */
+    void (*format_number)(char *out, size_t cap, uint32_t value);
     int sequence;            /**< Current sequence number */
 
 
@@ -754,6 +767,7 @@ struct DAPServer
             SymbolListContext symbol_list;          /**< Context for symbolList command */
             SetCpuTracingContext set_cpu_tracing;   /**< Context for setCpuTracing command */
             GetCpuTraceRingContext get_cpu_trace_ring; /**< Context for getCpuTraceRing command */
+            SetRadixContext set_radix;              /**< Context for setRadix command */
         } context;
     } current_command;
 

@@ -867,6 +867,7 @@ void initialize_command_handlers(DAPServer *server)
     server->command_handlers[DAP_CMD_SYMBOL_LIST] = &handle_symbol_list;
     server->command_handlers[DAP_CMD_SET_CPU_TRACING] = &handle_set_cpu_tracing;       // custom (RetroCore)
     server->command_handlers[DAP_CMD_GET_CPU_TRACE_RING] = &handle_get_cpu_trace_ring; // custom (RetroCore)
+    server->command_handlers[DAP_CMD_SET_RADIX] = &handle_set_radix;                   // custom (ND emulators)
 }
 
 /**

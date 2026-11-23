@@ -2052,6 +2052,20 @@ int handle_configuration_done(DAPServer *server, cJSON *args, DAPResponse *respo
  * @param response Response to fill with results
  * @return int 0 on success, error code on failure
  */
+/* Copy the "radix" string argument of a launch or attach into server->radix_argument ("" when
+ * absent or not a string; a longer word is cut, and the implementation rejects it). */
+FormatOptions parse_format_options(cJSON *format);
+
+static void store_radix_argument(DAPServer *server, cJSON *args)
+{
+    cJSON *radix = args ? cJSON_GetObjectItem(args, "radix") : NULL;
+    server->radix_argument[0] = '\0';
+    if (radix && cJSON_IsString(radix) && radix->valuestring)
+    {
+        snprintf(server->radix_argument, sizeof(server->radix_argument), "%s", radix->valuestring);
+    }
+}
+
 int handle_evaluate(DAPServer *server, cJSON *args, DAPResponse *response)
 {
     if (!server || !args || !response)
@@ -2080,6 +2094,10 @@ int handle_evaluate(DAPServer *server, cJSON *args, DAPResponse *response)
     // Parse optional context
     cJSON *ctx = cJSON_GetObjectItem(args, "context");
     server->current_command.context.evaluate.context = (ctx && cJSON_IsString(ctx)) ? strdup(ctx->valuestring) : NULL;
+
+    // Parse optional format (VS Code "View as hex" sends {"hex": true})
+    server->current_command.context.evaluate.format_options =
+        parse_format_options(cJSON_GetObjectItem(args, "format"));
 
     // Call the implementation callback
     int result = dap_server_execute_callback(server, DAP_CMD_EVALUATE);
@@ -2314,6 +2332,10 @@ int handle_launch(DAPServer *server, cJSON *args, DAPResponse *response)
 
     // Mark that we're handling a launch command
     server->current_command.type = DAP_CMD_LAUNCH;
+
+    // The "radix" argument (ND emulators: the radix whole numbers are shown in), kept for the
+    // implementation callback to read
+    store_radix_argument(server, args);
 
     // Clear any previous state values that might be leftover
     if (server->debugger_state.program_path)
@@ -2670,6 +2692,9 @@ int handle_attach(DAPServer *server, cJSON *args, DAPResponse *response)
         return 0;
     }
     parse_program_args(server, args);
+    // The "radix" argument (ND emulators: the radix whole numbers are shown in), kept for the
+    // implementation callback to read
+    store_radix_argument(server, args);
     if (server->command_callbacks[DAP_CMD_ATTACH] &&
         dap_server_execute_callback(server, DAP_CMD_ATTACH) < 0)
     {
@@ -2966,14 +2991,29 @@ int handle_stack_trace(DAPServer *server, cJSON *args, DAPResponse *response)
             return -1;
         }
 
-        char frame_name[50];
+        char frame_name[128];
         uint32_t offset = 0;
         if (frame_data->valid_symbol)
         {
             offset = frame_data->instruction_pointer_reference - frame_data->symbol_entry_point; 
         }
 
-        snprintf(frame_name, sizeof(frame_name), "%-*s +%d @%05o", max_frame_name_len, frame_data->name, offset,frame_data->instruction_pointer_reference );
+        char offset_text[24];
+        char address_text[24];
+        if (server->format_number)
+        {
+            server->format_number(offset_text, sizeof(offset_text), offset);
+            server->format_number(address_text, sizeof(address_text),
+                                  (uint32_t)frame_data->instruction_pointer_reference);
+        }
+        else
+        {
+            snprintf(offset_text, sizeof(offset_text), "%d", (int)offset);
+            snprintf(address_text, sizeof(address_text), "%05o",
+                     (unsigned)frame_data->instruction_pointer_reference);
+        }
+        snprintf(frame_name, sizeof(frame_name), "%-*s +%s @%s", max_frame_name_len, frame_data->name,
+                 offset_text, address_text);
 
         
         // Add required properties according to the DAP spec
@@ -4765,5 +4805,45 @@ int handle_get_cpu_trace_ring(DAPServer *server, cJSON *args, DAPResponse *respo
 
     set_response_success(response, body);
     free_cpu_trace_ring_ctx(ctx);
+    return 0;
+}
+
+/**
+ * @brief Handle the setRadix request (custom, ND emulators)
+ *
+ * Request args: { radix: "octal" | "decimal" | "hex" }. The implementation callback
+ * (DAP_CMD_SET_RADIX) checks the word and switches; it answers non-zero for a word it does not
+ * know, and the request then fails. The response body is empty.
+ */
+int handle_set_radix(DAPServer *server, cJSON *args, DAPResponse *response)
+{
+    if (!server || !response)
+    {
+        set_response_error(response, "Invalid arguments");
+        return -1;
+    }
+    server->current_command.type = DAP_CMD_SET_RADIX;
+    SetRadixContext *ctx = &server->current_command.context.set_radix;
+    memset(ctx, 0, sizeof(*ctx));
+    cJSON *radix = args ? cJSON_GetObjectItem(args, "radix") : NULL;
+    if (!radix || !cJSON_IsString(radix) || !radix->valuestring)
+    {
+        set_response_error(response, "setRadix needs \"radix\": \"octal\", \"decimal\" or \"hex\"");
+        return 0;
+    }
+    snprintf(ctx->radix, sizeof(ctx->radix), "%s", radix->valuestring);
+    if (!server->command_callbacks[DAP_CMD_SET_RADIX] ||
+        dap_server_execute_callback(server, DAP_CMD_SET_RADIX) != 0)
+    {
+        set_response_error(response, "Unknown radix (octal, decimal or hex)");
+        return 0;
+    }
+    cJSON *body = cJSON_CreateObject();
+    if (!body)
+    {
+        set_response_error(response, "Failed to create response body");
+        return 0;
+    }
+    set_response_success(response, body);
     return 0;
 }

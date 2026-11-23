@@ -386,6 +386,20 @@ class DAPDebugger:
             return err
         return response.get("body", {})
 
+    async def set_radix(self, radix: str) -> dict[str, Any]:
+        """Set the radix whole numbers are shown in (ND emulators nd100x and nd500x).
+
+        Maps to the DAP custom request 'setRadix' {"radix": "octal" | "decimal" | "hex"}; the
+        emulator answers success (an empty body) and sends an 'invalidated' event, or fails the
+        request for another word.
+        """
+        self._check_connected()
+        response = await self.conn.send_request("setRadix", {"radix": radix})
+        err = self._check_response(response)
+        if "error" in err:
+            return err
+        return {"radix": radix}
+
     # ── Breakpoints ─────────────────────────────────────────────────────
 
     async def set_breakpoints(

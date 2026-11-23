@@ -83,7 +83,8 @@ static const char* command_strings[] = {
     "consoleWrite",
     "symbolList",
     "setCpuTracing",
-    "getCpuTraceRing"
+    "getCpuTraceRing",
+    "setRadix"
 };
 
 /**

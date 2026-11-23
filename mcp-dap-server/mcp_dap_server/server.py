@@ -447,6 +447,21 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="debug_set_radix",
+            description="Set the radix the ND emulators' debuggers (nd100x, nd500x) show whole numbers in: "
+                        "octal (177773B, the default, as the ND tools print numbers), decimal (-5) or hex (0FFFBH). "
+                        "Variables, registers, addresses, frame names, evaluate results and logpoints change; a REAL "
+                        "stays decimal. Forwards to the DAP custom request 'setRadix'; the emulator then sends "
+                        "'invalidated'. The same switch from the debug console: debug_evaluate 'radix hex' with context repl.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "radix": {"type": "string", "enum": ["octal", "decimal", "hex"], "description": "The radix"},
+                },
+                "required": ["radix"],
+            },
+        ),
         # Symbol listing (custom DAP extension)
         Tool(
             name="debug_symbol_list",
@@ -632,6 +647,8 @@ async def _dispatch(name: str, args: dict) -> dict | list:
             return await debugger.get_cpu_trace_ring(
                 max_entries=args.get("max_entries", 0),
             )
+        case "debug_set_radix":
+            return await debugger.set_radix(radix=args["radix"])
 
         case _:
             return {"error": True, "message": f"Unknown tool: {name}"}
